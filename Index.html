@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>چت‌روم کلاسی</title>
+    <!-- کتابخانه Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body { font-family: Tahoma, sans-serif; background-color: #f0f2f5; margin: 0; padding: 20px; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .container { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); width: 100%; max-width: 400px; display: none; }
+        .active { display: block !important; }
+        input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; font-family: inherit; }
+        button { width: 100%; padding: 10px; background-color: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-family: inherit; }
+        button:hover { background-color: #218838; }
+        #chat-box { height: 300px; overflow-y: auto; border: 1px solid #ddd; border-radius: 5px; padding: 10px; margin-bottom: 10px; background: #fafafa; display: flex; flex-direction: column; }
+        .message { background: #e1ffc7; padding: 8px; border-radius: 5px; margin-bottom: 8px; align-self: flex-start; max-width: 80%; }
+        .message.my-msg { background: #dcf8c6; align-self: flex-end; }
+        .message strong { display: block; font-size: 12px; color: #555; margin-bottom: 3px; }
+        .invite-link { background: #fff3cd; padding: 10px; border-radius: 5px; font-size: 12px; word-break: break-all; margin-top: 10px; display: none; }
+    </style>
+</head>
+<body>
+
+    <!-- صفحه ورود / ساخت کانال -->
+    <div id="login-page" class="container active">
+        <h2>ورود به چت‌روم</h2>
+        <input type="text" id="display-name" placeholder="نام نمایشی شما" required>
+        <input type="text" id="contact-info" placeholder="ایمیل یا شماره تماس" required>
+        
+        <div id="create-channel-section">
+            <input type="text" id="channel-name" placeholder="نام کانال جدید (مثلاً کلاس ریاضی)">
+            <button onclick="createChannel()">ساخت کانال و ورود</button>
+            <hr style="margin: 20px 0; border: 0; border-top: 1px solid #ccc;">
+            <input type="text" id="invite-code" placeholder="یا کد دعوت را وارد کنید">
+            <button onclick="joinChannel()">ورود به کانال</button>
+        </div>
+    </div>
+
+    <!-- صفحه چت -->
+    <div id="chat-page" class="container">
+        <h3 id="channel-title" style="margin-top:0;">در حال اتصال...</h3>
+        <div id="chat-box"></div>
+        <div style="display: flex; gap: 10px;">
+            <input type="text" id="message-input" placeholder="پیام خود را بنویسید..." style="margin:0;">
+            <button onclick="sendMessage()" style="width: 80px; margin:0;">ارسال</button>
+        </div>
+        <div id="invite-link-box" class="invite-link">
+            لینک دعوت شما (برای دیگران بفرستید):<br>
+            <strong id="invite-link-text"></strong>
+        </div>
+        <button onclick="location.reload()" style="background:#dc3545; margin-top:10px;">خروج</button>
+    </div>
+
+    <script>
+        // اطلاعات اتصال
+        const SUPABASE_URL = 'https://fthqzvsujrulemqejykg.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_EgEwjhYlGnZFWKpTumxFxw_pkouWvFN';
+
+        // نام متغیر را به db تغییر دادم تا با نام کتابخانه تداخل نداشته باشد
+        const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        let currentUser = null;
+        let currentChannel = null;
+        let realtimeSubscription = null;
+
+        // بررسی لینک دعوت
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlInviteCode = urlParams.get('code');
+        if (urlInviteCode) {
+            document.getElementById('create-channel-section').style.display = 'none';
+            document.getElementById('invite-code').value = urlInviteCode;
+            const joinBtn = document.createElement('button');
+            joinBtn.innerText = 'ورود به کانال دعوت‌شده';
+            joinBtn.onclick = joinChannel;
+            document.getElementById('create-channel-section').parentNode.appendChild(joinBtn);
+            document.getElementById('create-channel-section').style.display = 'block';
+        }
+
+        // ذخیره یا پیدا کردن کاربر
+        async function getOrCreateUser(name, contact) {
+            try {
+                const isEmail = contact.includes('@');
+                const query = isEmail ? { email: contact } : { phone: contact };
+                
+                let { data: user, error } = await db.from('users').select('*').match(query).maybeSingle();
+                
+                if (error) { alert('خطا در بررسی کاربر: ' + error.message); return null; }
+
+                if (!user) {
+                    const newUser = { display_name: name };
+                    if (isEmail) newUser.email = contact;
+                    else newUser.phone = contact;
+
+                    const { data: createdUser, error: createError } = await db.from('users').insert([newUser]).select().single();
+                    if (createError) { alert('خطا در ساخت کاربر: ' + createError.message); return null; }
+                    user = createdUser;
+                }
+                return user;
+            } catch (err) {
+                alert('خطای غیرمنتظره در کاربر: ' + err.message);
+                return null;
+            }
+        }
+
+        // ساخت کانال
+        async function createChannel() {
+            const name = document.getElementById('display-name').value;
+            const contact = document.getElementById('contact-info').value;
+            const channelName = document.getElementById('channel-name').value;
+
+            if (!name || !contact || !channelName) { alert('لطفاً همه فیلدها را پر کنید'); return; }
+
+            try {
+                currentUser = await getOrCreateUser(name, contact);
+                if (!currentUser) return;
+
+                const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+
+                const { data: channel, error } = await db.from('channels').insert([{ name: channelName, invite_code: inviteCode }]).select().single();
+                
+                if (error) { alert('خطا در ساخت کانال: ' + error.message); return; }
+                
+                enterChat(channel);
+            } catch (err) {
+                alert('خطای غیرمنتظره در ساخت کانال: ' + err.message);
+            }
+        }
+
+        // ورود با کد دعوت
+        async function joinChannel() {
+            const name = document.getElementById('display-name').value;
+            const contact = document.getElementById('contact-info').value;
+            const inviteCode = document.getElementById('invite-code').value;
+
+            if (!name || !contact || !inviteCode) { alert('لطفاً همه فیلدها را پر کنید'); return; }
+
+            try {
+                currentUser = await getOrCreateUser(name, contact);
+                if (!currentUser) return;
+
+                const { data: channel, error } = await db.from('channels').select('*').eq('invite_code', inviteCode.toUpperCase()).maybeSingle();
+                
+                if (error) { alert('خطا در پیدا کردن کانال: ' + error.message); return; }
+                if (!channel) { alert('کد دعوت نامعتبر است'); return; }
+                
+                enterChat(channel);
+            } catch (err) {
+                alert('خطای غیرمنتظره در ورود: ' + err.message);
+            }
+        }
+
+        // شروع چت
+        async function enterChat(channel) {
+            currentChannel = channel;
+            document.getElementById('login-page').classList.remove('active');
+            document.getElementById('chat-page').classList.add('active');
+            document.getElementById('channel-title').innerText = channel.name;
+            
+            const currentUrl = window.location.origin + window.location.pathname;
+            document.getElementById('invite-link-text').innerText = `${currentUrl}?code=${channel.invite_code}`;
+            document.getElementById('invite-link-box').style.display = 'block';
+
+            loadMessages();
+
+            realtimeSubscription = db
+                .channel('custom-all-channel')
+                .on(
+                    'postgres_changes',
+                    { event: 'INSERT', schema: 'public', table: 'messages', filter: `channel_id=eq.${channel.id}` },
+                    (payload) => {
+                        addMessageToUI(payload.new, payload.new.user_id === currentUser.id);
+                    }
+                )
+                .subscribe();
+        }
+
+        // دریافت پیام‌ها
+        async function loadMessages() {
+            const { data: messages, error } = await db
+                .from('messages')
+                .select('*, users(display_name)')
+                .eq('channel_id', currentChannel.id)
+                .order('created_at', { ascending: true });
+
+            if (error) { console.error(error); return; }
+            
+            const chatBox = document.getElementById('chat-box');
+            chatBox.innerHTML = '';
+            messages.forEach(msg => {
+                addMessageToUI(msg, msg.user_id === currentUser.id, msg.users.display_name);
+            });
+        }
+
+        // نمایش پیام
+        function addMessageToUI(msg, isMine, senderName = null) {
+            const chatBox = document.getElementById('chat-box');
+            const div = document.createElement('div');
+            div.className = `message ${isMine ? 'my-msg' : ''}`;
+            
+            if (!senderName) {
+                db.from('users').select('display_name').eq('id', msg.user_id).single().then(res => {
+                    if (res.data) {
+                        div.innerHTML = `<strong>${res.data.display_name}</strong>${msg.content}`;
+                    }
+                });
+            } else {
+                div.innerHTML = `<strong>${isMine ? 'شما' : senderName}</strong>${msg.content}`;
+            }
+            
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        // ارسال پیام
+        async function sendMessage() {
+            const input = document.getElementById('message-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            input.value = '';
+
+            const { error } = await db.from('messages').insert([{
+                channel_id: currentChannel.id,
+                user_id: currentUser.id,
+                content: text
+            }]);
+
+            if (error) alert('خطا در ارسال پیام: ' + error.message);
+        }
+
+        document.getElementById('message-input').addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
